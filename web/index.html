@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobradar · 总览</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
+        onerror="this.onerror=null;this.src='/vendor/chart.umd.js'"></script>
+</head>
+<body>
+<header>
+  <span class="brand">jobradar</span>
+  <nav>
+    <a href="/">总览</a>
+    <a href="report.html">分析报告</a>
+    <a href="tasks.html">任务</a>
+  </nav>
+  <span class="spacer"></span>
+  <span class="meta" id="meta"></span>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <div class="grid kpi" style="margin-bottom:16px">
+    <div class="card">
+      <h2>库内岗位</h2>
+      <div class="kpi-val" id="k-jobs">—</div>
+      <div class="kpi-sub" id="k-jobs-sub"></div>
+    </div>
+    <div class="card">
+      <h2>分析覆盖率</h2>
+      <div class="kpi-val" id="k-cov">—</div>
+      <div class="kpi-sub" id="k-cov-sub"></div>
+    </div>
+    <div class="card">
+      <h2>最近抓取</h2>
+      <div class="kpi-val" id="k-crawl" style="font-size:20px">—</div>
+      <div class="kpi-sub" id="k-crawl-sub"></div>
+    </div>
+    <div class="card">
+      <h2>定时抓取</h2>
+      <div class="kpi-val" id="k-sched" style="font-size:20px">—</div>
+      <div class="kpi-sub" id="k-sched-sub"></div>
+    </div>
+  </div>
+
+  <div class="grid two" style="margin-bottom:16px">
+    <div class="card">
+      <h2>方向分布</h2>
+      <div style="height:260px"><canvas id="c-track"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>招聘类型</h2>
+      <div style="height:260px"><canvas id="c-recruit"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid two" style="margin-bottom:16px">
+    <div class="card">
+      <h2>公司 × 方向</h2>
+      <div style="height:260px"><canvas id="c-matrix"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>各公司岗位数</h2>
+      <div style="height:260px"><canvas id="c-company"></canvas></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>近 60 天发布量</h2>
+    <div style="height:220px"><canvas id="c-trend"></canvas></div>
+  </div>
+
+  <div class="grid two">
+    <div class="card">
+      <h2>各方向分析进度</h2>
+      <table id="t-cov"><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>最新报告</h2>
+      <div id="latest"></div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+<script>
+async function load() {
+  let d;
+  try {
+    d = await api('/api/overview');
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+
+  renderBanner(d.coverage);
+
+  document.getElementById('k-jobs').textContent = d.jobs_total.toLocaleString();
+  document.getElementById('k-jobs-sub').textContent =
+    (d.by_recruit || []).map(t =>
+      `${RECRUIT_LABEL[t.name] || t.name} ${t.count}`).join(' · ')
+    || d.by_company.map(c => `${c.name} ${c.count}`).join(' · ');
+
+  const cov = d.coverage;
+  const kc = document.getElementById('k-cov');
+  kc.textContent = cov.pct + '%';
+  kc.className = 'kpi-val ' + (cov.is_thin ? 'warn' : 'ok');
+  document.getElementById('k-cov-sub').textContent =
+    `${cov.skills_total} / ${cov.jobs_total} 个岗位已分析`;
+
+  const lc = d.last_crawl;
+  document.getElementById('k-crawl').textContent =
+    lc ? fmtAgo(lc.started_at) : '还没抓过';
+  document.getElementById('k-crawl-sub').textContent = lc
+    ? `${lc.companies.join('、')} · 抓 ${lc.fetched} 新增 ${lc.inserted}`
+      + (lc.partial ? ' · 部分失败' : '')
+    : '去任务页点一次抓取';
+
+  const s = d.scheduler;
+  document.getElementById('k-sched').textContent =
+    s.config.enabled ? `每天 ${String(s.config.hour).padStart(2,'0')}:${String(s.config.minute).padStart(2,'0')}` : '未开启';
+  document.getElementById('k-sched-sub').textContent = s.next_run_at
+    ? `下次 ${s.next_run_at.slice(5,16)}（${fmtUntil(s.next_run_at)}）`
+    : '在任务页可以开启';
+
+  doughnut('c-track',
+    d.by_track.map(t => TRACK_LABEL[t.name] || t.name),
+    d.by_track.map(t => t.count));
+  if (d.by_recruit && d.by_recruit.length) {
+    doughnut('c-recruit',
+      d.by_recruit.map(t => RECRUIT_LABEL[t.name] || t.name),
+      d.by_recruit.map(t => t.count));
+  }
+  barChart('c-company',
+    d.by_company.map(c => c.name), d.by_company.map(c => c.count),
+    { horizontal: true, label: '岗位数' });
+  stackedBar('c-matrix', d.matrix);
+  lineChart('c-trend',
+    d.publish_trend.map(p => p.name.slice(5)),
+    d.publish_trend.map(p => p.count));
+
+  const tb = document.querySelector('#t-cov tbody');
+  tb.innerHTML = '';
+  tb.append(el('tr', {},
+    el('th', {}, '方向'), el('th', { class: 'num' }, '岗位'),
+    el('th', { class: 'num' }, '已分析'), el('th', { class: 'num' }, '覆盖率')));
+  for (const t of cov.by_track) {
+    tb.append(el('tr', {},
+      el('td', {}, t.label),
+      el('td', { class: 'num' }, t.total.toLocaleString()),
+      el('td', { class: 'num' }, t.done),
+      el('td', { class: 'num' }, t.pct + '%')));
+  }
+
+  const box = document.getElementById('latest');
+  box.innerHTML = '';
+  if (!d.latest_report) {
+    box.append(el('div', { class: 'empty' },
+      el('div', {}, '还没有分析报告'),
+      el('div', { class: 'hint' }, '去任务页点「开始分析」')));
+  } else {
+    const r = d.latest_report;
+    box.append(
+      el('div', { style: 'margin-bottom:10px' },
+        el('span', { class: 'tag ' + r.status }, r.status),
+        ' ', el('span', { class: 'muted' }, fmtDate(r.created_at))),
+      el('table', {}, el('tbody', {},
+        el('tr', {}, el('td', {}, '分析岗位'), el('td', { class: 'num' }, r.jobs_selected)),
+        el('tr', {}, el('td', {}, '成功抽取'), el('td', { class: 'num' }, r.extracted_ok)),
+        el('tr', {}, el('td', {}, '模型调用'), el('td', { class: 'num' }, r.llm_calls)),
+        el('tr', {}, el('td', {}, '当时覆盖率'), el('td', { class: 'num' }, r.coverage_at_time + '%')))),
+      el('div', { style: 'margin-top:12px' },
+        el('a', { href: 'report.html' }, '查看完整报告 →')));
+  }
+}
+
+api('/api/meta').then(m => {
+  document.getElementById('meta').textContent =
+    (m.llm_ready ? m.model : '模型未配置') + ' · v' + m.version;
+}).catch(() => {});
+
+load();
+</script>
+</body>
+</html>

@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobradar · 任务</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
+        onerror="this.onerror=null;this.src='/vendor/chart.umd.js'"></script>
+</head>
+<body>
+<header>
+  <span class="brand">jobradar</span>
+  <nav>
+    <a href="/">总览</a>
+    <a href="report.html">分析报告</a>
+    <a href="tasks.html">任务</a>
+  </nav>
+</header>
+
+<main>
+  <div class="card" id="current-card" style="margin-bottom:16px">
+    <h2>当前任务</h2>
+    <div id="current"></div>
+  </div>
+
+  <div class="grid two" style="margin-bottom:16px">
+    <div class="card">
+      <h2>抓取岗位</h2>
+      <div class="field">
+        <label>招聘类型</label>
+        <div class="chips" id="crawl-types"></div>
+      </div>
+      <div class="field">
+        <label>公司（不选＝全部）</label>
+        <div class="chips" id="companies"></div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>每家最多翻几页</label>
+          <input type="number" id="max-pages" value="30" min="1" max="200" style="width:110px">
+        </div>
+        <div class="field">
+          <label>请求间隔（秒）</label>
+          <input type="number" id="interval" value="1.5" min="0.5" max="10" step="0.5" style="width:110px">
+        </div>
+      </div>
+      <button id="btn-crawl">开始抓取</button>
+      <div class="hint">不花钱。页数是总预算 —— 一次抓多种类型时要调大。</div>
+    </div>
+
+    <div class="card">
+      <h2>分析岗位</h2>
+      <div class="field">
+        <label>招聘类型</label>
+        <div class="chips" id="ana-types"></div>
+      </div>
+      <div class="field">
+        <label>方向</label>
+        <div class="chips" id="tracks"></div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>分析数量上限</label>
+          <input type="number" id="limit" value="150" min="1" max="1000" style="width:110px">
+        </div>
+        <div class="field">
+          <label>每批岗位数</label>
+          <input type="number" id="batch" value="15" min="1" max="50" style="width:110px">
+        </div>
+      </div>
+      <button id="btn-analyze">开始分析</button>
+      <div class="hint" id="preview-hint">正在估算…</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h2>定时抓取</h2>
+    <div class="row">
+      <div class="field">
+        <label>开关</label>
+        <select id="s-enabled">
+          <option value="0">关闭</option>
+          <option value="1">开启</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>时间</label>
+        <input type="time" id="s-time" value="03:30">
+      </div>
+      <div class="field">
+        <label>每家页数</label>
+        <input type="number" id="s-pages" value="30" min="1" max="200" style="width:100px">
+      </div>
+      <div class="field" style="flex:1">
+        <label>星期</label>
+        <div class="chips" id="s-weekdays"></div>
+      </div>
+      <div class="field">
+        <button class="ghost" id="btn-schedule">保存</button>
+      </div>
+    </div>
+    <div class="hint" id="s-next"></div>
+    <div class="hint">只定时抓取。分析要手动点——它会消耗模型配额。</div>
+  </div>
+
+  <div class="card">
+    <h2>历史任务</h2>
+    <table id="history"><tbody></tbody></table>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+<script>
+let pickedCompanies = [];
+let pickedTracks = ['backend', 'ai'];
+let crawlTypes = ['campus', 'intern'];
+let anaTypes = ['campus', 'intern'];
+let pickedWeekdays = [0,1,2,3,4,5,6];
+let lastPreview = null;
+
+// ---- 表单 ----
+
+api('/api/meta').then(m => {
+  const box = document.getElementById('companies');
+  for (const s of m.spiders) {
+    box.append(el('div', {
+      class: 'chip',
+      onclick: (e) => {
+        e.target.classList.toggle('on');
+        pickedCompanies = [...box.querySelectorAll('.chip.on')]
+          .map(c => c.dataset.slug);
+      },
+      'data-slug': s.slug,
+    }, s.company));
+  }
+  if (!m.llm_ready) {
+    toast('模型未配置：' + (m.llm_error || ''), true);
+    document.getElementById('btn-analyze').disabled = true;
+  }
+});
+
+// 招聘类型选择器：抓取和分析各一组
+function buildTypeChips(boxId, picked, onChange) {
+  const box = document.getElementById(boxId);
+  for (const [k, v] of Object.entries(RECRUIT_LABEL)) {
+    box.append(el('div', {
+      class: 'chip' + (picked.includes(k) ? ' on' : ''),
+      onclick: (e) => {
+        e.target.classList.toggle('on');
+        onChange([...box.querySelectorAll('.chip.on')].map(c => c.dataset.k));
+      },
+      'data-k': k,
+    }, v));
+  }
+}
+buildTypeChips('crawl-types', crawlTypes, (v) => { crawlTypes = v; });
+buildTypeChips('ana-types', anaTypes, (v) => { anaTypes = v; refreshPreview(); });
+
+const tracksBox = document.getElementById('tracks');
+for (const [k, v] of Object.entries(TRACK_LABEL)) {
+  tracksBox.append(el('div', {
+    class: 'chip' + (pickedTracks.includes(k) ? ' on' : ''),
+    onclick: (e) => {
+      e.target.classList.toggle('on');
+      pickedTracks = [...tracksBox.querySelectorAll('.chip.on')]
+        .map(c => c.dataset.k);
+      refreshPreview();
+    },
+    'data-k': k,
+  }, v));
+}
+
+const wdBox = document.getElementById('s-weekdays');
+WEEKDAYS.forEach((w, i) => {
+  wdBox.append(el('div', {
+    class: 'chip on',
+    onclick: (e) => {
+      e.target.classList.toggle('on');
+      pickedWeekdays = [...wdBox.querySelectorAll('.chip.on')]
+        .map(c => Number(c.dataset.i));
+    },
+    'data-i': String(i),
+  }, w));
+});
+
+// ---- 分析预览：点按钮之前先说清要烧多少次调用 ----
+
+let previewTimer = null;
+function refreshPreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(doPreview, 250);
+}
+
+async function doPreview() {
+  const btn = document.getElementById('btn-analyze');
+  const hint = document.getElementById('preview-hint');
+  const limit = document.getElementById('limit').value;
+  const batch = document.getElementById('batch').value;
+  const qs = new URLSearchParams();
+  pickedTracks.forEach(t => qs.append('tracks', t));
+  anaTypes.forEach(t => qs.append('recruit_types', t));
+  qs.set('limit', limit); qs.set('batch_size', batch);
+  try {
+    const p = await api('/api/analyze/preview?' + qs);
+    lastPreview = p;
+    if (p.selected === 0) {
+      btn.disabled = true;
+      btn.textContent = '没有匹配的岗位';
+      hint.textContent = '先去抓取，或换个方向筛选';
+      return;
+    }
+    if (p.to_extract === 0) {
+      btn.disabled = true;
+      btn.textContent = '这批岗位已全部分析过';
+      hint.textContent = p.warning || '把 limit 调大才会分析到新岗位';
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = `开始分析（预计 ${p.estimated_llm_calls} 次模型调用）`;
+    hint.textContent =
+      `选中 ${p.selected} 个，其中 ${p.already_cached} 个已缓存，`
+      + `需新抽取 ${p.to_extract} 个。完成后覆盖率 ${p.coverage_now}% → ${p.coverage_after}%`;
+  } catch (e) {
+    hint.textContent = '估算失败：' + e.message;
+  }
+}
+['limit', 'batch'].forEach(id =>
+  document.getElementById(id).addEventListener('input', refreshPreview));
+
+// ---- 提交 ----
+
+document.getElementById('btn-crawl').onclick = async () => {
+  try {
+    await api('/api/tasks/crawl', { method: 'POST', body: JSON.stringify({
+      companies: pickedCompanies.length ? pickedCompanies : null,
+      recruit_types: crawlTypes,
+      max_pages: Number(document.getElementById('max-pages').value),
+      interval: Number(document.getElementById('interval').value),
+    })});
+    toast('抓取已开始');
+    tick();
+  } catch (e) { toast(e.message, true); }
+};
+
+document.getElementById('btn-analyze').onclick = async () => {
+  if (!lastPreview) return;
+  const n = lastPreview.estimated_llm_calls;
+  if (!confirm(`将发起约 ${n} 次模型调用，继续？`)) return;
+  try {
+    await api('/api/tasks/analyze', { method: 'POST', body: JSON.stringify({
+      tracks: pickedTracks,
+      recruit_types: anaTypes,
+      limit: Number(document.getElementById('limit').value),
+      batch_size: Number(document.getElementById('batch').value),
+      confirm_llm_calls: n,
+    })});
+    toast('分析已开始');
+    tick();
+  } catch (e) {
+    if (e.status === 409 && e.detail && e.detail.actual !== undefined) {
+      toast(`预计调用数已变为 ${e.detail.actual}，请重新确认`, true);
+      doPreview();
+    } else toast(e.message, true);
+  }
+};
+
+// ---- 定时配置 ----
+
+async function loadSchedule() {
+  const s = await api('/api/schedule');
+  document.getElementById('s-enabled').value = s.config.enabled ? '1' : '0';
+  document.getElementById('s-time').value =
+    String(s.config.hour).padStart(2,'0') + ':' + String(s.config.minute).padStart(2,'0');
+  document.getElementById('s-pages').value = s.config.max_pages;
+  pickedWeekdays = s.config.weekdays;
+  [...wdBox.children].forEach((c, i) =>
+    c.classList.toggle('on', pickedWeekdays.includes(i)));
+  document.getElementById('s-next').textContent = s.next_run_at
+    ? `下次运行：${s.next_run_at}（${fmtUntil(s.next_run_at)})`
+    : '未启用';
+}
+
+document.getElementById('btn-schedule').onclick = async () => {
+  const [h, m] = document.getElementById('s-time').value.split(':');
+  try {
+    await api('/api/schedule', { method: 'PUT', body: JSON.stringify({
+      enabled: document.getElementById('s-enabled').value === '1',
+      hour: Number(h), minute: Number(m),
+      weekdays: pickedWeekdays,
+      max_pages: Number(document.getElementById('s-pages').value),
+    })});
+    toast('已保存');
+    loadSchedule();
+  } catch (e) { toast(e.message, true); }
+};
+
+// ---- 当前任务与历史 ----
+
+function renderCurrent(t) {
+  const box = document.getElementById('current');
+  box.innerHTML = '';
+  if (!t) {
+    box.append(el('div', { class: 'muted' }, '空闲中'));
+    return;
+  }
+  const p = t.progress || {};
+  box.append(
+    el('div', { class: 'row', style: 'justify-content:space-between' },
+      el('div', {},
+        el('span', { class: 'tag running' }, t.kind === 'crawl' ? '抓取' : '分析'),
+        ' ', el('strong', {}, p.message || t.state),
+        t.trigger === 'schedule' ? el('span', { class: 'muted' }, ' （定时触发）') : null),
+      el('button', { class: 'danger', onclick: () => cancel(t.id) }, '取消')),
+    el('div', { class: 'bar', style: 'margin:12px 0' },
+      el('i', { style: `width:${p.pct || 0}%` })),
+    el('div', { class: 'hint' },
+      p.total ? `${p.current} / ${p.total}` : '',
+      t.kind === 'analyze'
+        ? '　取消是协作式的：抓取最多等一个请求超时，分析最多等一次模型调用（约 120 秒）'
+        : ''),
+    el('div', { class: 'logs' }, (t.logs || []).join('\n')));
+  const logs = box.querySelector('.logs');
+  logs.scrollTop = logs.scrollHeight;
+}
+
+async function cancel(id) {
+  try {
+    const r = await api(`/api/tasks/${id}/cancel`, { method: 'POST' });
+    toast(r.note || '已请求取消');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function renderHistory() {
+  const rows = await api('/api/tasks?limit=20');
+  const tb = document.querySelector('#history tbody');
+  tb.innerHTML = '';
+  tb.append(el('tr', {}, el('th', {}, '时间'), el('th', {}, '类型'),
+    el('th', {}, '触发'), el('th', {}, '状态'), el('th', {}, '结果')));
+  if (!rows.length) {
+    tb.append(el('tr', {}, el('td', { colspan: '5', class: 'muted' }, '还没有任务')));
+    return;
+  }
+  for (const t of rows) {
+    let summary = '—';
+    if (t.result) {
+      summary = t.kind === 'crawl'
+        ? `抓 ${t.result.total_fetched} · 新增 ${t.result.total_inserted}`
+        : `岗位 ${t.result.jobs_selected} · 调用 ${t.result.llm_calls}`;
+    } else if (t.error) summary = t.error.slice(0, 60);
+    tb.append(el('tr', {},
+      el('td', {}, fmtDate(t.created_at).slice(5, 16)),
+      el('td', {}, t.kind === 'crawl' ? '抓取' : '分析'),
+      el('td', {}, t.trigger === 'schedule' ? '定时' : '手动'),
+      el('td', {}, el('span', { class: 'tag ' + t.state }, t.state)),
+      el('td', { class: 'muted' }, summary)));
+  }
+}
+
+async function tick() {
+  const t = await api('/api/tasks/current');
+  renderCurrent(t);
+  await renderHistory();
+  const busy = !!t;
+  document.getElementById('btn-crawl').disabled = busy;
+  document.getElementById('btn-analyze').disabled =
+    busy || !lastPreview || lastPreview.to_extract === 0;
+  if (!busy) doPreview();
+  return busy;
+}
+
+poll(tick, { fast: 1000, slow: 6000 });
+loadSchedule();
+doPreview();
+</script>
+</body>
+</html>

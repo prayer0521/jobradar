@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# jobradar 入口。不带参数 = 抓取 + 分析 + 出报告。
+cd "$(dirname "$0")" || exit 1
+exec python3 -m jobradar "$@"

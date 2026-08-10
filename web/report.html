@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobradar · 分析报告</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"
+        onerror="this.onerror=null;this.src='/vendor/chart.umd.js'"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        onerror="this.onerror=null;this.src='/vendor/marked.min.js'"></script>
+</head>
+<body>
+<header>
+  <span class="brand">jobradar</span>
+  <nav>
+    <a href="/">总览</a>
+    <a href="report.html">分析报告</a>
+    <a href="tasks.html">任务</a>
+  </nav>
+  <span class="spacer"></span>
+  <button class="ghost" id="btn-compare">对比模式</button>
+</header>
+
+<main>
+  <div id="banner"></div>
+  <div class="split">
+    <div>
+      <div class="card">
+        <h2>历史报告</h2>
+        <div id="list"></div>
+      </div>
+    </div>
+    <div>
+      <div class="card" id="pane"></div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+<script>
+let reports = [];
+let current = null;
+let compareMode = false;
+let picked = [];
+
+const pane = document.getElementById('pane');
+
+async function loadList() {
+  reports = await api('/api/reports?limit=50');
+  const box = document.getElementById('list');
+  box.innerHTML = '';
+  if (!reports.length) {
+    box.append(el('div', { class: 'empty' }, '还没有报告'));
+    return;
+  }
+  for (const r of reports) {
+    const on = compareMode ? picked.includes(r.id) : current === r.id;
+    box.append(el('div', {
+      class: 'list-item' + (on ? ' on' : ''),
+      onclick: () => pick(r.id),
+    },
+      el('div', {},
+        el('span', { class: 'tag ' + r.status }, r.status),
+        ' ', el('span', {}, fmtDate(r.created_at).slice(5, 16))),
+      el('div', { class: 'hint' },
+        `${r.jobs_selected} 个岗位 · 覆盖率 ${r.coverage_at_time}% · ${r.llm_calls} 次调用`)));
+  }
+}
+
+function pick(id) {
+  if (compareMode) {
+    if (picked.includes(id)) picked = picked.filter(x => x !== id);
+    else picked = [...picked, id].slice(-2);
+    loadList();
+    if (picked.length === 2) showCompare();
+    else pane.innerHTML = '<div class="empty">再选一份报告来对比</div>';
+  } else {
+    current = id;
+    loadList();
+    showReport(id);
+  }
+}
+
+async function showReport(id) {
+  pane.innerHTML = '<div class="empty">加载中…</div>';
+  let r;
+  try {
+    r = await api(id ? `/api/reports/${id}` : '/api/reports/latest');
+  } catch (e) {
+    pane.innerHTML = '';
+    pane.append(el('div', { class: 'empty' },
+      el('div', {}, e.status === 404 ? '还没有任何报告' : e.message),
+      el('div', { class: 'hint' }, '去任务页点「开始分析」生成第一份')));
+    return;
+  }
+  current = r.id;
+
+  pane.innerHTML = '';
+  // 样本口径条：先说清这份报告基于什么，再看结论
+  pane.append(el('div', { class: 'card', style: 'background:var(--panel-2);margin-bottom:16px' },
+    el('h2', {}, '样本口径'),
+    el('div', { class: 'row' },
+      el('div', {}, el('div', { class: 'hint' }, '分析岗位'),
+        el('strong', {}, String(r.jobs_selected))),
+      el('div', {}, el('div', { class: 'hint' }, '成功抽取'),
+        el('strong', {}, String(r.extracted_ok))),
+      el('div', {}, el('div', { class: 'hint' }, '缓存命中'),
+        el('strong', {}, String(r.cache_hits))),
+      el('div', {}, el('div', { class: 'hint' }, '模型调用'),
+        el('strong', {}, String(r.llm_calls))),
+      el('div', {}, el('div', { class: 'hint' }, '生成时覆盖率'),
+        el('strong', { class: r.coverage_at_time < 5 ? 'kpi-val warn' : '',
+                       style: 'font-size:14px' }, r.coverage_at_time + '%')),
+      el('div', {}, el('div', { class: 'hint' }, '模型'),
+        el('strong', {}, r.model || '—')),
+      el('div', {}, el('div', { class: 'hint' }, '方向'),
+        el('strong', {}, (r.tracks || []).map(t => TRACK_LABEL[t] || t).join('、'))))));
+
+  if (r.status === 'failed') {
+    pane.append(el('div', { class: 'banner' },
+      el('strong', {}, '这份报告生成失败'),
+      el('div', {}, r.error || '')));
+  }
+
+  if (r.top_skills && r.top_skills.length) {
+    const top = r.top_skills.slice(0, 15);
+    pane.append(el('div', { class: 'card', style: 'margin-bottom:16px' },
+      el('h2', {}, '高频技能 Top 15'),
+      el('div', { style: 'height:340px' },
+        el('canvas', { id: 'c-skills' }))));
+    barChart('c-skills', top.map(s => s.name), top.map(s => s.count),
+      { horizontal: true, label: '出现次数' });
+  }
+
+  if (r.markdown) {
+    pane.append(el('div', { class: 'md', html: renderMarkdown(r.markdown) }));
+  }
+
+  pane.append(el('div', { style: 'margin-top:24px;text-align:right' },
+    el('button', { class: 'danger', onclick: () => del(r.id) }, '删除这份报告')));
+}
+
+async function del(id) {
+  if (!confirm('删除这份报告？不影响已抽取的技能缓存。')) return;
+  try {
+    await api(`/api/reports/${id}`, { method: 'DELETE' });
+    toast('已删除');
+    current = null;
+    await loadList();
+    showReport(null);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function showCompare() {
+  const [a, b] = picked;
+  pane.innerHTML = '<div class="empty">对比中…</div>';
+  let d;
+  try {
+    d = await api(`/api/reports/compare?a=${a}&b=${b}`);
+  } catch (e) { toast(e.message, true); return; }
+
+  pane.innerHTML = '';
+  if (d.warning) {
+    pane.append(el('div', { class: 'banner' },
+      el('strong', {}, '样本量差异较大'), el('div', {}, d.warning)));
+  }
+  pane.append(el('h2', {},
+    `${fmtDate(d.a.created_at).slice(5,16)}（${d.a.jobs_selected} 个）`
+    + `  →  ${fmtDate(d.b.created_at).slice(5,16)}（${d.b.jobs_selected} 个）`));
+
+  const rows = d.skills.filter(s => s.status !== 'flat').slice(0, 40);
+  const tb = el('tbody', {},
+    el('tr', {}, el('th', {}, '技能'), el('th', { class: 'num' }, 'A'),
+      el('th', { class: 'num' }, 'B'), el('th', { class: 'num' }, '变化'),
+      el('th', {}, '')));
+  const LABEL = { new: '新出现', gone: '消失', up: '上升', down: '下降' };
+  for (const s of rows) {
+    tb.append(el('tr', {},
+      el('td', {}, s.name),
+      el('td', { class: 'num' }, String(s.a)),
+      el('td', { class: 'num' }, String(s.b)),
+      el('td', { class: 'num' }, (s.delta > 0 ? '+' : '') + s.delta),
+      el('td', {}, el('span', {
+        class: 'tag ' + (s.status === 'new' || s.status === 'up' ? 'ok' : 'failed'),
+      }, LABEL[s.status]))));
+  }
+  pane.append(el('table', {}, tb));
+  if (!rows.length) pane.append(el('div', { class: 'empty' }, '两份报告的技能频次没有差异'));
+}
+
+document.getElementById('btn-compare').onclick = (e) => {
+  compareMode = !compareMode;
+  picked = [];
+  e.target.textContent = compareMode ? '退出对比' : '对比模式';
+  e.target.className = compareMode ? '' : 'ghost';
+  pane.innerHTML = compareMode
+    ? '<div class="empty">从左侧选两份报告</div>' : '';
+  loadList();
+  if (!compareMode) showReport(current);
+};
+
+(async () => {
+  try {
+    const cov = await api('/api/coverage');
+    renderBanner(cov);
+  } catch (e) { /* 忽略 */ }
+  await loadList();
+  showReport(null);
+})();
+</script>
+</body>
+</html>
